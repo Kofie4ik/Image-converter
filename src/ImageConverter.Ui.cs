@@ -289,6 +289,8 @@ namespace ImageConverter
     static class Gfx
     {
         static readonly Dictionary<float, Font> icons = new Dictionary<float, Font>();
+        const string IconFont = "Segoe MDL2 Assets";
+        public static bool HideText;               // set while rendering a text-free snapshot for the language fade
 
         public static GraphicsPath Round(RectangleF r, float rad)
         {
@@ -316,13 +318,14 @@ namespace ImageConverter
         public static Font Icons(float size)
         {
             Font f;
-            if (!icons.TryGetValue(size, out f)) { f = new Font("Segoe MDL2 Assets", size); icons[size] = f; }
+            if (!icons.TryGetValue(size, out f)) { f = new Font(IconFont, size); icons[size] = f; }
             return f;
         }
 
         public static void Draw(Graphics g, string s, Font f, Rectangle r, Color c, TextFormatFlags fl)
         {
             if (string.IsNullOrEmpty(s)) return;
+            if (HideText && f.Name != IconFont) return;      // icons stay, words disappear
             TextRenderer.DrawText(g, s, f, r, c, fl | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
         }
 
@@ -394,6 +397,12 @@ namespace ImageConverter
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             return g;
         }
+    }
+
+    // Label that honours Gfx.HideText (its text is drawn by WinForms, not by Gfx.Draw)
+    class TLabel : Label
+    {
+        protected override void OnPaint(PaintEventArgs e) { if (!Gfx.HideText) base.OnPaint(e); }
     }
 
     class RoundPanel : Panel
@@ -1036,59 +1045,87 @@ namespace ImageConverter
         }
     }
 
-    // Borderless, click-through window showing a snapshot of the old UI; it fades out over the changed UI.
-    class FadeOverlay : Form
+    // Transition layer: a child control covering the client area that shows blended off-screen snapshots of the UI.
+    // Nothing is a separate window, so there is no flash while a window comes up and nothing to misalign.
+    //  - crossfade (theme): old fades into new;
+    //  - fade-through (language): the words fade out over the old layout, the layout swaps while nothing is
+    //    readable, then the new words fade in — old and new text never overlap.
+    class Transition : Control
     {
-        public static int Completed;               // finished fades (checked by the screenshot test)
-        readonly Bitmap snapshot;
-        System.Windows.Forms.Timer timer;
+        public static int Completed;                 // finished transitions (checked by the screenshot test)
+        const int WM_NCHITTEST = 0x84;
+        Bitmap a, aBare, bBare, b;                   // old with text, old without, new without, new with
+        int outMs, inMs;
         Stopwatch clock;
-        int duration;
+        System.Windows.Forms.Timer timer;
+        readonly ImageAttributes attrs = new ImageAttributes();
 
-        public FadeOverlay(Bitmap snapshot)
+        public Transition(Bitmap first)
         {
-            this.snapshot = snapshot;
-            FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            StartPosition = FormStartPosition.Manual;
-            BackgroundImage = snapshot;
-            BackgroundImageLayout = ImageLayout.None;
-            DoubleBuffered = true;
-            Opacity = 0.999;                        // makes it a layered window from the start
+            a = first;                               // shown as is until Run() starts the animation
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            TabStop = false;
         }
 
-        protected override bool ShowWithoutActivation { get { return true; } }
-
-        protected override CreateParams CreateParams
+        protected override void WndProc(ref Message m)
         {
-            get
-            {
-                CreateParams cp = base.CreateParams;
-                cp.ExStyle |= 0x80 | 0x20 | 0x08000000;   // WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
-                return cp;
-            }
+            if (m.Msg == WM_NCHITTEST) { m.Result = (IntPtr)(-1); return; }                     // HTTRANSPARENT
+            base.WndProc(ref m);
         }
 
-        public void Start(int ms)
+        // crossfade: aBare/bBare = null, a -> b over outMs + inMs.  fade-through: a -> aBare, then bBare -> b.
+        public void Run(Bitmap aBare, Bitmap bBare, Bitmap b, int outMs, int inMs)
         {
-            duration = ms;
+            this.aBare = aBare; this.bBare = bBare; this.b = b; this.outMs = outMs; this.inMs = inMs;
             clock = Stopwatch.StartNew();
             timer = new System.Windows.Forms.Timer { Interval = 15 };
-            timer.Tick += delegate
-            {
-                double t = Math.Min(1.0, clock.ElapsedMilliseconds / (double)duration);
-                Opacity = Math.Max(0, 0.999 * (1 - t * t * (3 - 2 * t)));   // smoothstep
-                if (t >= 1) { timer.Stop(); Completed++; Close(); }
-            };
+            timer.Tick += delegate { if (clock.ElapsedMilliseconds >= outMs + inMs) Finish(); else Invalidate(); };
             timer.Start();
         }
 
-        protected override void OnFormClosed(FormClosedEventArgs e)
+        // ends the animation at once (also used when the window is resized mid-way)
+        public void Finish()
         {
-            base.OnFormClosed(e);
-            if (timer != null) timer.Dispose();
-            BackgroundImage = null;
-            snapshot.Dispose();
+            if (timer != null) { timer.Dispose(); timer = null; Completed++; }
+            if (Parent != null) Parent.Controls.Remove(this);
+            Dispose();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (timer != null) timer.Dispose();
+                foreach (Bitmap x in new[] { a, aBare, bBare, b }) if (x != null) x.Dispose();
+                attrs.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        static double Smooth(double t) { t = Math.Max(0, Math.Min(1, t)); return t * t * (3 - 2 * t); }
+
+        void Blend(Graphics g, Bitmap under, Bitmap over, double alpha)
+        {
+            g.DrawImageUnscaled(under, 0, 0);
+            if (alpha <= 0) return;
+            if (alpha >= 1) { g.DrawImageUnscaled(over, 0, 0); return; }
+            ColorMatrix cm = new ColorMatrix(); cm.Matrix33 = (float)alpha;
+            attrs.SetColorMatrix(cm);
+            g.DrawImage(over, new Rectangle(0, 0, over.Width, over.Height), 0, 0, over.Width, over.Height, GraphicsUnit.Pixel, attrs);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;              // exact 1:1 pixels, no half-pixel blur
+            if (clock == null) { g.DrawImageUnscaled(a, 0, 0); return; }
+            double ms = clock.ElapsedMilliseconds;
+            if (aBare == null) Blend(g, a, b, Smooth(ms / (outMs + inMs)));
+            else if (ms < outMs) Blend(g, aBare, a, 1 - Smooth(ms / outMs));
+            else Blend(g, bBare, b, Smooth((ms - outMs) / inMs));
         }
     }
 
@@ -1148,6 +1185,7 @@ namespace ImageConverter
         EmptyHint outEmpty;
         Panel dropGap;
         SplitContainer split;
+        TableLayoutPanel root;         // everything inside the window padding; rendered off-screen for transitions
         Label srcCount, outCount, status;
         SelectBox cbFormat, cbSize;
         NumBox numQuality, numW, numH;
@@ -1193,7 +1231,7 @@ namespace ImageConverter
 
         Label L(string text)
         {
-            return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Tag = "muted", Margin = new Padding(0, S(4), S(10), S(4)) };
+            return new TLabel { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Tag = "muted", Margin = new Padding(0, S(4), S(10), S(4)) };
         }
 
         FlatButton Small(string text, string glyph)
@@ -1208,8 +1246,8 @@ namespace ImageConverter
             h.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             h.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             h.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            title = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(10), 0) };
-            counter = new Label { AutoSize = false, AutoEllipsis = true, Tag = "muted", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, S(2), S(6), 0) };
+            title = new TLabel { AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(10), 0) };
+            counter = new TLabel { AutoSize = false, AutoEllipsis = true, Tag = "muted", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, S(2), S(6), 0) };
             FlowLayoutPanel f = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = new Padding(0) };
             f.Controls.AddRange(buttons);
             h.Controls.Add(title, 0, 0); h.Controls.Add(counter, 1, 0); h.Controls.Add(f, 2, 0);
@@ -1218,7 +1256,7 @@ namespace ImageConverter
 
         void BuildUi()
         {
-            TableLayoutPanel root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = new Padding(0) };
+            root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = new Padding(0) };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -1234,8 +1272,8 @@ namespace ImageConverter
             head.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             LogoMark logo = new LogoMark { Size = new Size(S(42), S(42)), Margin = new Padding(0, 0, S(12), 0), Anchor = AnchorStyles.Left };
             Panel titles = new Panel { Size = new Size(S(320), S(46)), Margin = new Padding(0), Anchor = AnchorStyles.Left };
-            lblTitle = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), Location = new Point(-S(2), -S(1)) };
-            lblSub = new Label { AutoSize = true, Tag = "muted", Location = new Point(0, S(26)) };
+            lblTitle = new TLabel { AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), Location = new Point(-S(2), -S(1)) };
+            lblSub = new TLabel { AutoSize = true, Tag = "muted", Location = new Point(0, S(26)) };
             titles.Controls.Add(lblTitle); titles.Controls.Add(lblSub);
             FlowLayoutPanel tools = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = new Padding(0) };
             btnAdd = new FlatButton("", Glyph.Add, FlatButton.Kinds.Secondary);
@@ -1312,7 +1350,7 @@ namespace ImageConverter
             numW = new NumBox(1, 30000, 3440) { Size = new Size(S(84), S(36)), Step = 10, Margin = new Padding(0) };
             numH = new NumBox(1, 30000, 1440) { Size = new Size(S(84), S(36)), Step = 10, Margin = new Padding(0) };
             FlowLayoutPanel wh = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), 0, S(4)) };
-            wh.Controls.AddRange(new Control[] { numW, new Label { Text = "×", AutoSize = true, Tag = "muted", Margin = new Padding(S(6), S(9), S(6), 0) }, numH });
+            wh.Controls.AddRange(new Control[] { numW, new TLabel { Text = "×", AutoSize = true, Tag = "muted", Margin = new Padding(S(6), S(9), S(6), 0) }, numH });
 
             lblFormat = L(""); lblSize = L("");
             grid.Controls.Add(lblFormat, 0, 0); grid.Controls.Add(cbFormat, 1, 0);
@@ -1340,7 +1378,7 @@ namespace ImageConverter
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             btnGo = new FlatButton("", Glyph.Convert, FlatButton.Kinds.Primary) { HeightDip = 42, Anchor = AnchorStyles.Left, Margin = new Padding(0), Font = new Font("Segoe UI Semibold", 10f) };
             Panel mid = new Panel { Dock = DockStyle.Fill, Height = S(42), Margin = new Padding(S(18), 0, 0, 0), Padding = new Padding(0, S(2), 0, S(6)) };
-            status = new Label { Dock = DockStyle.Top, Height = S(24), Tag = "muted", AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+            status = new TLabel { Dock = DockStyle.Top, Height = S(24), Tag = "muted", AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
             progress = new ProgressLine { Dock = DockStyle.Bottom, Height = S(6) };
             mid.Controls.Add(progress); mid.Controls.Add(status);
             bottom.Controls.Add(btnGo, 0, 0); bottom.Controls.Add(mid, 1, 0);
@@ -1445,16 +1483,16 @@ namespace ImageConverter
             Invalidate(true);
         }
 
-        public static string DebugSnapshotPath;     // screenshot test: where to save the crossfade snapshot
+        public static string DebugSnapshotPath;     // screenshot test: where to save the transition snapshots
 
         public static int ThemeSwitches;             // applied theme changes (checked by the screenshot test)
-        FadeOverlay activeFade;
+        Transition activeFade;
         readonly Stopwatch sinceThemeSwitch = new Stopwatch();
 
         public void SwitchLanguage()
         {
             if (activeFade != null) return;            // no stacking of transitions
-            Crossfade(240, delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); });
+            Animate(110, 160, true, delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); });
         }
 
         // Dark ↔ light swaps the brightness of the whole window. To stay far below the 3-flashes-per-second
@@ -1466,44 +1504,73 @@ namespace ImageConverter
             if (sinceThemeSwitch.IsRunning && sinceThemeSwitch.ElapsedMilliseconds < 1000) return;
             sinceThemeSwitch.Restart();
             ThemeSwitches++;
-            Crossfade(500, delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); });
+            Animate(500, 0, false, delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); });
         }
 
-        // Snapshot the client area, cover it, apply the change underneath, then fade the snapshot out,
-        // so relayout and repaint happen out of sight instead of jumping.
-        void Crossfade(int ms, Action change)
+        // Client area rendered off-screen through WM_PRINT (DrawToBitmap). PrintWindow is no good here: on a
+        // visible window it repaints the controls on screen as a side effect, which is a flash by itself.
+        // Only `root` is rendered (the transition layer is its sibling, so it never ends up in the capture);
+        // the window padding around it is plain background. Returns null when the window can't be captured.
+        Bitmap Snapshot(bool withText)
         {
-            if (!Native.AnimationsEnabled()) { change(); return; }   // user turned animations off in Windows
-            Bitmap snap = null;
+            if (!IsHandleCreated || !Visible || WindowState == FormWindowState.Minimized || ClientSize.Width <= 0 || ClientSize.Height <= 0) return null;
+            Bitmap bmp = new Bitmap(ClientSize.Width, ClientSize.Height, PixelFormat.Format32bppRgb);   // no alpha: GDI ignores it
+            Gfx.HideText = !withText;
             try
             {
-                if (IsHandleCreated && Visible && WindowState != FormWindowState.Minimized && ClientSize.Width > 0 && ClientSize.Height > 0)
-                {
-                    snap = new Bitmap(ClientSize.Width, ClientSize.Height);
-                    bool ok;
-                    using (Graphics g = Graphics.FromImage(snap))
-                    {
-                        IntPtr hdc = g.GetHdc();
-                        ok = Native.PrintWindow(Handle, hdc, 1 | 2);   // PW_CLIENTONLY | PW_RENDERFULLCONTENT
-                        g.ReleaseHdc(hdc);
-                    }
-                    if (!ok) { snap.Dispose(); snap = null; }
-                }
+                using (Graphics g = Graphics.FromImage(bmp)) g.Clear(BackColor);
+                root.DrawToBitmap(bmp, root.Bounds);
             }
-            catch { if (snap != null) { snap.Dispose(); snap = null; } }
+            catch { bmp.Dispose(); return null; }
+            finally { Gfx.HideText = false; }
+            return bmp;
+        }
 
-            if (snap == null) { change(); return; }
-            if (DebugSnapshotPath != null) snap.Save(DebugSnapshotPath, ImageFormat.Png);
+        // Cover the client area with a snapshot, apply the change underneath (relayout and repaint happen out of
+        // sight), snapshot the result and let the layer animate between them. fadeThrough: words out, then words in.
+        void Animate(int outMs, int inMs, bool fadeThrough, Action change)
+        {
+            if (!Native.AnimationsEnabled()) { change(); return; }   // user turned animations off in Windows
+            Bitmap a = Snapshot(true);
+            Bitmap aBare = a != null && fadeThrough ? Snapshot(false) : null;
+            if (a == null || (fadeThrough && aBare == null)) { if (a != null) a.Dispose(); change(); return; }
 
-            FadeOverlay overlay = new FadeOverlay(snap);
-            overlay.Bounds = RectangleToScreen(ClientRectangle);
-            overlay.FormClosed += delegate { if (activeFade == overlay) activeFade = null; };
-            activeFade = overlay;
-            overlay.Show(this);
-            overlay.Update();
-            change();
-            Refresh();
-            overlay.Start(ms);
+            Transition layer = new Transition(a) { Bounds = ClientRectangle, Visible = false };
+            layer.Disposed += delegate { if (activeFade == layer) activeFade = null; };
+            activeFade = layer;
+            Controls.Add(layer);
+            layer.BringToFront();
+            layer.Visible = true;
+            layer.Update();                                          // painted before anything underneath changes
+
+            change();                                                // ~40 ms; the two captures below ~35 ms
+            Bitmap bBare = fadeThrough ? Snapshot(false) : null;
+            Bitmap b = Snapshot(true);
+            if (DebugSnapshotPath != null)
+            {
+                a.Save(DebugSnapshotPath, ImageFormat.Png);
+                if (aBare != null) aBare.Save(DebugSnapshotPath + ".bare.png", ImageFormat.Png);
+            }
+            if (b == null || (fadeThrough && bBare == null))
+            {
+                if (b != null) b.Dispose();
+                if (bBare != null) bBare.Dispose();
+                if (aBare != null) aBare.Dispose();
+                layer.Finish();                                      // change is applied; just show it
+                return;
+            }
+            if (DebugSnapshotPath != null)
+            {
+                b.Save(DebugSnapshotPath + ".after.png", ImageFormat.Png);
+                if (bBare != null) bBare.Save(DebugSnapshotPath + ".after.bare.png", ImageFormat.Png);
+            }
+            layer.Run(aBare, bBare, b, outMs, inMs);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (activeFade != null) activeFade.Finish();             // snapshots no longer match the window
         }
 
         static string SourceTip(Entry en)
@@ -1833,7 +1900,7 @@ namespace ImageConverter
             return "sources=" + srcList.Items.Count + " " + string.Join(" ", states) + " results=" + outList.Items.Count +
                    " infoPending=" + pending + " busy=" + busy + " status=" + status.Text +
                    " langBtn=" + WindowRect(btnLang) + " themeBtn=" + WindowRect(btnTheme) +
-                   " fadesCompleted=" + FadeOverlay.Completed + " openForms=" + Application.OpenForms.Count +
+                   " fadesCompleted=" + Transition.Completed + " openForms=" + Application.OpenForms.Count +
                    " themeSwitches=" + ThemeSwitches + " dark=" + Theme.Dark + " animations=" + Native.AnimationsEnabled();
         }
 
