@@ -38,6 +38,14 @@ namespace ImageConverter
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
         [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+        [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint param, ref bool value, uint winIni);
+
+        // Windows "Animation effects" (Settings → Accessibility → Visual effects); true if unknown
+        public static bool AnimationsEnabled()
+        {
+            try { bool on = true; return !SystemParametersInfo(0x1042 /* SPI_GETCLIENTAREAANIMATION */, 0, ref on, 0) || on; }
+            catch { return true; }
+        }
     }
 
     static class Program
@@ -125,7 +133,8 @@ namespace ImageConverter
         // --screenshot <out.png> [--light] [--convert <dir>] [files...]: render the window to a PNG (layout check)
         static int Screenshot(string[] a)
         {
-            bool light = false, wide = false, switchLang = false; string convertDir = null;
+            Theme.SaveDisabled = true;
+            bool light = false, wide = false, switchLang = false, spamTheme = false; string convertDir = null;
             List<string> files = new List<string>();
             for (int i = 2; i < a.Length; i++)
             {
@@ -133,6 +142,7 @@ namespace ImageConverter
                 else if (a[i] == "--wide") wide = true;
                 else if (a[i] == "--en") Lang.En = true;
                 else if (a[i] == "--switch-lang") switchLang = true;
+                else if (a[i] == "--spam-theme") spamTheme = true;
                 else if (a[i] == "--convert" && i + 1 < a.Length) convertDir = a[++i];
                 else files.Add(a[i]);
             }
@@ -158,6 +168,15 @@ namespace ImageConverter
                     f.SwitchLanguage();
                     Stopwatch fade = Stopwatch.StartNew();
                     while (fade.ElapsedMilliseconds < 600) { Application.DoEvents(); Thread.Sleep(10); }
+                }
+                if (spamTheme)
+                {
+                    // hammer the theme button: 20 clicks every 50 ms for 1 s, then again after a 1.2 s pause
+                    for (int round = 0; round < 2; round++)
+                    {
+                        for (int i = 0; i < 20; i++) { f.ToggleTheme(); Stopwatch st = Stopwatch.StartNew(); while (st.ElapsedMilliseconds < 50) { Application.DoEvents(); Thread.Sleep(5); } }
+                        Stopwatch pause = Stopwatch.StartNew(); while (pause.ElapsedMilliseconds < 1200) { Application.DoEvents(); Thread.Sleep(10); }
+                    }
                 }
                 for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(10); }
                 File.WriteAllText(a[1] + ".txt", f.DebugReport());
@@ -253,8 +272,11 @@ namespace ImageConverter
             return Lang.SystemPrefersEnglish();
         }
 
+        public static bool SaveDisabled;             // test runs must not overwrite the user's settings
+
         public static void Save()
         {
+            if (SaveDisabled) return;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath));
@@ -1327,7 +1349,7 @@ namespace ImageConverter
             // ---- events
             btnAdd.Click += delegate { AddFilesDialog(); };
             btnAddDir.Click += delegate { AddFolderDialog(); };
-            btnTheme.Click += delegate { Crossfade(delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); }); };
+            btnTheme.Click += delegate { ToggleTheme(); };
             btnLang.Click += delegate { SwitchLanguage(); };
             btnRemove.Click += delegate { RemoveSelected(srcList); };
             btnClear.Click += delegate { ClearList(srcList); };
@@ -1425,15 +1447,33 @@ namespace ImageConverter
 
         public static string DebugSnapshotPath;     // screenshot test: where to save the crossfade snapshot
 
+        public static int ThemeSwitches;             // applied theme changes (checked by the screenshot test)
+        FadeOverlay activeFade;
+        readonly Stopwatch sinceThemeSwitch = new Stopwatch();
+
         public void SwitchLanguage()
         {
-            Crossfade(delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); });
+            if (activeFade != null) return;            // no stacking of transitions
+            Crossfade(240, delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); });
+        }
+
+        // Dark ↔ light swaps the brightness of the whole window. To stay far below the 3-flashes-per-second
+        // threshold (WCAG 2.3.1) theme changes are limited to one per second, clicks during a transition are
+        // ignored, and the change fades slowly instead of snapping.
+        public void ToggleTheme()
+        {
+            if (activeFade != null) return;
+            if (sinceThemeSwitch.IsRunning && sinceThemeSwitch.ElapsedMilliseconds < 1000) return;
+            sinceThemeSwitch.Restart();
+            ThemeSwitches++;
+            Crossfade(500, delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); });
         }
 
         // Snapshot the client area, cover it, apply the change underneath, then fade the snapshot out,
         // so relayout and repaint happen out of sight instead of jumping.
-        void Crossfade(Action change)
+        void Crossfade(int ms, Action change)
         {
+            if (!Native.AnimationsEnabled()) { change(); return; }   // user turned animations off in Windows
             Bitmap snap = null;
             try
             {
@@ -1457,11 +1497,13 @@ namespace ImageConverter
 
             FadeOverlay overlay = new FadeOverlay(snap);
             overlay.Bounds = RectangleToScreen(ClientRectangle);
+            overlay.FormClosed += delegate { if (activeFade == overlay) activeFade = null; };
+            activeFade = overlay;
             overlay.Show(this);
             overlay.Update();
             change();
             Refresh();
-            overlay.Start(240);
+            overlay.Start(ms);
         }
 
         static string SourceTip(Entry en)
@@ -1791,7 +1833,8 @@ namespace ImageConverter
             return "sources=" + srcList.Items.Count + " " + string.Join(" ", states) + " results=" + outList.Items.Count +
                    " infoPending=" + pending + " busy=" + busy + " status=" + status.Text +
                    " langBtn=" + WindowRect(btnLang) + " themeBtn=" + WindowRect(btnTheme) +
-                   " fadesCompleted=" + FadeOverlay.Completed + " openForms=" + Application.OpenForms.Count;
+                   " fadesCompleted=" + FadeOverlay.Completed + " openForms=" + Application.OpenForms.Count +
+                   " themeSwitches=" + ThemeSwitches + " dark=" + Theme.Dark + " animations=" + Native.AnimationsEnabled();
         }
 
         // control bounds in window coordinates (same frame as a PrintWindow screenshot)
