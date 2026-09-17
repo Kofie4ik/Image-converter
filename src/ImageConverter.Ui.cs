@@ -478,6 +478,7 @@ namespace ImageConverter
         public Kinds Kind;
         public string Glyph;
         public int HeightDip = 36;
+        public bool Square;        // same footprint as an icon-only button (used for the short RU/EN label)
         bool hover, down;
 
         public FlatButton(string text, string glyph, Kinds kind)
@@ -490,7 +491,7 @@ namespace ImageConverter
         public override Size GetPreferredSize(Size proposedSize)
         {
             float k = K; int h = (int)(HeightDip * k);
-            if (string.IsNullOrEmpty(Text)) return new Size(h, h);
+            if (string.IsNullOrEmpty(Text) || Square) return new Size(h, h);
             int gw = Glyph != null ? (int)(24 * k) : 0;
             return new Size(Gfx.Measure(Text, Font).Width + gw + (int)(30 * k), h);
         }
@@ -530,6 +531,7 @@ namespace ImageConverter
 
             Font iconF = Gfx.Icons(10.5f);
             if (string.IsNullOrEmpty(Text)) { Gfx.Draw(g, Glyph, iconF, ClientRectangle, fg, Gfx.Center); return; }
+            if (Glyph == null) { Gfx.Draw(g, Text, Font, ClientRectangle, fg, Gfx.Center); return; }
             Size ts = Gfx.Measure(Text, Font);
             int gw = Glyph != null ? (int)(24 * k) : 0;
             int x = (Width - ts.Width - gw) / 2;
@@ -1154,7 +1156,7 @@ namespace ImageConverter
             FlowLayoutPanel tools = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = new Padding(0) };
             btnAdd = new FlatButton("", Glyph.Add, FlatButton.Kinds.Secondary);
             btnAddDir = new FlatButton("", Glyph.Folder, FlatButton.Kinds.Secondary);
-            btnLang = new FlatButton("", null, FlatButton.Kinds.Ghost) { Margin = new Padding(S(10), 3, 0, 3) };
+            btnLang = new FlatButton("", null, FlatButton.Kinds.Ghost) { Square = true, Margin = new Padding(S(10), 3, 0, 3) };
             btnTheme = new FlatButton("", Glyph.Sun, FlatButton.Kinds.Ghost) { Margin = new Padding(S(2), 3, 0, 3) };
             tools.Controls.AddRange(new Control[] { btnAdd, btnAddDir, btnLang, btnTheme });
             head.Controls.Add(logo, 0, 0); head.Controls.Add(titles, 1, 0); head.Controls.Add(tools, 3, 0);
@@ -1686,7 +1688,15 @@ namespace ImageConverter
                 .Select(gr => "state" + gr.Key + "=" + gr.Count());
             int pending = srcList.Items.Cast<ListViewItem>().Concat(outList.Items.Cast<ListViewItem>()).Count(it => ((Entry)it.Tag).InfoPending);
             return "sources=" + srcList.Items.Count + " " + string.Join(" ", states) + " results=" + outList.Items.Count +
-                   " infoPending=" + pending + " busy=" + busy + " status=" + status.Text;
+                   " infoPending=" + pending + " busy=" + busy + " status=" + status.Text +
+                   " langBtn=" + WindowRect(btnLang) + " themeBtn=" + WindowRect(btnTheme);
+        }
+
+        // control bounds in window coordinates (same frame as a PrintWindow screenshot)
+        string WindowRect(Control c)
+        {
+            Point p = c.PointToScreen(Point.Empty);
+            return (p.X - Left) + "," + (p.Y - Top) + "," + c.Width + "," + c.Height;
         }
 
         public void TestConvert(string dir)
