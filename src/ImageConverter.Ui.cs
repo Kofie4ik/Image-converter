@@ -152,7 +152,13 @@ namespace ImageConverter
                     while (f.Busy && sw.ElapsedMilliseconds < 120000) { Application.DoEvents(); Thread.Sleep(15); }
                 }
                 while (!f.ThumbsReady && sw.ElapsedMilliseconds < 120000) { Application.DoEvents(); Thread.Sleep(15); }
-                if (switchLang) { Lang.En = !Lang.En; f.RefreshLanguage(); }
+                if (switchLang)
+                {
+                    MainForm.DebugSnapshotPath = a[1] + ".before.png";
+                    f.SwitchLanguage();
+                    Stopwatch fade = Stopwatch.StartNew();
+                    while (fade.ElapsedMilliseconds < 600) { Application.DoEvents(); Thread.Sleep(10); }
+                }
                 for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(10); }
                 File.WriteAllText(a[1] + ".txt", f.DebugReport());
                 using (Bitmap b = new Bitmap(f.Width, f.Height))
@@ -1008,6 +1014,62 @@ namespace ImageConverter
         }
     }
 
+    // Borderless, click-through window showing a snapshot of the old UI; it fades out over the changed UI.
+    class FadeOverlay : Form
+    {
+        public static int Completed;               // finished fades (checked by the screenshot test)
+        readonly Bitmap snapshot;
+        System.Windows.Forms.Timer timer;
+        Stopwatch clock;
+        int duration;
+
+        public FadeOverlay(Bitmap snapshot)
+        {
+            this.snapshot = snapshot;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            BackgroundImage = snapshot;
+            BackgroundImageLayout = ImageLayout.None;
+            DoubleBuffered = true;
+            Opacity = 0.999;                        // makes it a layered window from the start
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x80 | 0x20 | 0x08000000;   // WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+                return cp;
+            }
+        }
+
+        public void Start(int ms)
+        {
+            duration = ms;
+            clock = Stopwatch.StartNew();
+            timer = new System.Windows.Forms.Timer { Interval = 15 };
+            timer.Tick += delegate
+            {
+                double t = Math.Min(1.0, clock.ElapsedMilliseconds / (double)duration);
+                Opacity = Math.Max(0, 0.999 * (1 - t * t * (3 - 2 * t)));   // smoothstep
+                if (t >= 1) { timer.Stop(); Completed++; Close(); }
+            };
+            timer.Start();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            base.OnFormClosed(e);
+            if (timer != null) timer.Dispose();
+            BackgroundImage = null;
+            snapshot.Dispose();
+        }
+    }
+
     static class Menus
     {
         public static ContextMenuStrip Create(Control owner)
@@ -1265,8 +1327,8 @@ namespace ImageConverter
             // ---- events
             btnAdd.Click += delegate { AddFilesDialog(); };
             btnAddDir.Click += delegate { AddFolderDialog(); };
-            btnTheme.Click += delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); };
-            btnLang.Click += delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); };
+            btnTheme.Click += delegate { Crossfade(delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); }); };
+            btnLang.Click += delegate { SwitchLanguage(); };
             btnRemove.Click += delegate { RemoveSelected(srcList); };
             btnClear.Click += delegate { ClearList(srcList); };
             btnOpenDir.Click += delegate { if (lastOutDir != null) Process.Start("explorer.exe", "\"" + lastOutDir + "\""); };
@@ -1361,7 +1423,46 @@ namespace ImageConverter
             Invalidate(true);
         }
 
-        public void RefreshLanguage() { ApplyLanguage(); }
+        public static string DebugSnapshotPath;     // screenshot test: where to save the crossfade snapshot
+
+        public void SwitchLanguage()
+        {
+            Crossfade(delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); });
+        }
+
+        // Snapshot the client area, cover it, apply the change underneath, then fade the snapshot out,
+        // so relayout and repaint happen out of sight instead of jumping.
+        void Crossfade(Action change)
+        {
+            Bitmap snap = null;
+            try
+            {
+                if (IsHandleCreated && Visible && WindowState != FormWindowState.Minimized && ClientSize.Width > 0 && ClientSize.Height > 0)
+                {
+                    snap = new Bitmap(ClientSize.Width, ClientSize.Height);
+                    bool ok;
+                    using (Graphics g = Graphics.FromImage(snap))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        ok = Native.PrintWindow(Handle, hdc, 1 | 2);   // PW_CLIENTONLY | PW_RENDERFULLCONTENT
+                        g.ReleaseHdc(hdc);
+                    }
+                    if (!ok) { snap.Dispose(); snap = null; }
+                }
+            }
+            catch { if (snap != null) { snap.Dispose(); snap = null; } }
+
+            if (snap == null) { change(); return; }
+            if (DebugSnapshotPath != null) snap.Save(DebugSnapshotPath, ImageFormat.Png);
+
+            FadeOverlay overlay = new FadeOverlay(snap);
+            overlay.Bounds = RectangleToScreen(ClientRectangle);
+            overlay.Show(this);
+            overlay.Update();
+            change();
+            Refresh();
+            overlay.Start(240);
+        }
 
         static string SourceTip(Entry en)
         {
@@ -1689,7 +1790,8 @@ namespace ImageConverter
             int pending = srcList.Items.Cast<ListViewItem>().Concat(outList.Items.Cast<ListViewItem>()).Count(it => ((Entry)it.Tag).InfoPending);
             return "sources=" + srcList.Items.Count + " " + string.Join(" ", states) + " results=" + outList.Items.Count +
                    " infoPending=" + pending + " busy=" + busy + " status=" + status.Text +
-                   " langBtn=" + WindowRect(btnLang) + " themeBtn=" + WindowRect(btnTheme);
+                   " langBtn=" + WindowRect(btnLang) + " themeBtn=" + WindowRect(btnTheme) +
+                   " fadesCompleted=" + FadeOverlay.Completed + " openForms=" + Application.OpenForms.Count;
         }
 
         // control bounds in window coordinates (same frame as a PrintWindow screenshot)
