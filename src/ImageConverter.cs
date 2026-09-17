@@ -24,6 +24,14 @@ namespace ImageConverter
 {
     enum EncKind { Gdi, WinRt, External }
 
+    class ConvertResult
+    {
+        public int Quality;            // quality actually used (0 for lossless formats)
+        public Size Size;              // pixel size written
+        public bool Downscaled;        // shrunk to meet the size limit
+        public bool MissedTarget;      // even the smallest attempt is over the limit
+    }
+
     class OutFormat
     {
         public readonly string Ext, Tool; public readonly EncKind Kind;
@@ -455,7 +463,9 @@ namespace ImageConverter
             }
         }
 
-        public static void ConvertFile(string input, string output, OutFormat f, int quality, int mode, int W, int H)
+        // Metadata never carries over: images are decoded to pixels and encoded from scratch, so EXIF (GPS, date,
+        // camera) is not written to the output. Orientation is applied to the pixels on load.
+        public static ConvertResult ConvertFile(string input, string output, OutFormat f, int quality, int mode, int W, int H, long maxBytes)
         {
             bool existed = File.Exists(output);
             try
@@ -464,8 +474,16 @@ namespace ImageConverter
                 {
                     // "fit" padding: transparent where the format keeps alpha, black otherwise
                     bool alpha = f.Ext == ".png" || f.Ext == ".tif" || f.Ext == ".webp" || f.Ext == ".avif" || f.Ext == ".jxl";
-                    if (mode == 0 || W <= 0 || H <= 0) Save(src, output, f, quality);
-                    else using (Bitmap r = Resize(src, W, H, mode, alpha ? Color.Transparent : Color.Black)) Save(r, output, f, quality);
+                    Bitmap resized = mode == 0 || W <= 0 || H <= 0 ? null : Resize(src, W, H, mode, alpha ? Color.Transparent : Color.Black);
+                    try
+                    {
+                        Bitmap img = resized ?? src;
+                        ConvertResult res = new ConvertResult { Quality = f.HasQuality ? quality : 0, Size = img.Size };
+                        if (maxBytes > 0 && f.HasQuality) SaveUnder(img, output, f, quality, maxBytes, res);
+                        else Save(img, output, f, quality);
+                        return res;
+                    }
+                    finally { if (resized != null) resized.Dispose(); }
                 }
             }
             catch
@@ -473,6 +491,78 @@ namespace ImageConverter
                 // don't leave a broken/empty file behind (only if we created it)
                 if (!existed) { try { if (File.Exists(output)) File.Delete(output); } catch { } }
                 throw;
+            }
+        }
+
+        // ---- target file size
+
+        const int MinTargetQuality = 35;     // below this, shrinking the picture looks better than more compression
+        const int MaxDownscaleSteps = 10;    // 0.8^10 ≈ 11% of the width
+
+        static long SizeAt(Bitmap img, OutFormat f, int q, string tmp)
+        {
+            if (File.Exists(tmp)) File.Delete(tmp);
+            Save(img, tmp, f, q);
+            return new FileInfo(tmp).Length;
+        }
+
+        static void Replace(string from, string to)
+        {
+            if (File.Exists(to)) File.Delete(to);
+            File.Move(from, to);
+        }
+
+        // Highest quality in [lo, hi] whose file fits; the fitting file is left at `best`. 0 if even lo is too big.
+        static int FindQuality(Bitmap img, OutFormat f, int lo, int hi, long maxBytes, string tmp, string best)
+        {
+            if (SizeAt(img, f, hi, tmp) <= maxBytes) { Replace(tmp, best); return hi; }
+            if (lo >= hi || SizeAt(img, f, lo, tmp) > maxBytes) return 0;
+            Replace(tmp, best);
+            int fits = lo, tooBig = hi;
+            while (tooBig - fits > 1)
+            {
+                int mid = (fits + tooBig) / 2;
+                if (SizeAt(img, f, mid, tmp) <= maxBytes) { fits = mid; Replace(tmp, best); }
+                else tooBig = mid;
+            }
+            return fits;
+        }
+
+        // Binary search on quality (up to the user's setting, not below MinTargetQuality); if that can't fit,
+        // shrink the picture by 20% steps and search again. If nothing fits, the smallest attempt is kept.
+        static void SaveUnder(Bitmap img, string output, OutFormat f, int maxQuality, long maxBytes, ConvertResult res)
+        {
+            string tag = "imgconv_" + Guid.NewGuid().ToString("N");
+            string dir = f.Kind == EncKind.External ? AsciiTempDir() : Path.GetTempPath();
+            string tmp = Path.Combine(dir, tag + "_try" + f.Ext), best = Path.Combine(dir, tag + "_best" + f.Ext);
+            int hi = Math.Max(1, Math.Min(100, maxQuality)), lo = Math.Min(MinTargetQuality, hi);
+            Bitmap cur = img, scaled = null;
+            try
+            {
+                for (int step = 0; ; step++)
+                {
+                    int q = FindQuality(cur, f, lo, hi, maxBytes, tmp, best);
+                    if (q > 0)
+                    {
+                        Replace(best, output);
+                        res.Quality = q; res.Size = cur.Size; res.Downscaled = step > 0;
+                        return;
+                    }
+                    if (step >= MaxDownscaleSteps || cur.Width < 32 || cur.Height < 32) break;
+                    int nw = Math.Max(1, (int)Math.Round(cur.Width * 0.8)), nh = Math.Max(1, (int)Math.Round(cur.Height * 0.8));
+                    Bitmap next = Resize(cur, nw, nh, 3, Color.Black);
+                    if (scaled != null) scaled.Dispose();
+                    scaled = next; cur = next;
+                }
+                // could not fit: keep the smallest attempt and say so
+                Save(cur, output, f, lo);
+                res.Quality = lo; res.Size = cur.Size; res.Downscaled = cur != img; res.MissedTarget = true;
+            }
+            finally
+            {
+                if (scaled != null) scaled.Dispose();
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                try { if (File.Exists(best)) File.Delete(best); } catch { }
             }
         }
 

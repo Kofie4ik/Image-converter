@@ -65,12 +65,13 @@ namespace ImageConverter
             return 0;
         }
 
-        // --cli <in> <out.ext> [WxH] [fill|fit|stretch] [quality]; exit code 0 = ok, 1 = error, 2 = format unavailable
+        // --cli <in> <out.ext> [WxH] [fill|fit|stretch] [quality] [500kb|2mb]; exit code 0 = ok, 1 = error, 2 = format unavailable
         static int Cli(string[] a)
         {
             try
             {
                 int w = 0, h = 0, mode = 0, q = 90;
+                long maxBytes = 0;
                 for (int i = 3; i < a.Length; i++)
                 {
                     string s = a[i].ToLowerInvariant();
@@ -82,11 +83,19 @@ namespace ImageConverter
                     else if (s == "fill") mode = 1;
                     else if (s == "fit") mode = 2;
                     else if (s == "stretch") mode = 3;
+                    else if (s.EndsWith("kb") || s.EndsWith("mb"))
+                    {
+                        long n;
+                        if (long.TryParse(s.Substring(0, s.Length - 2), out n)) maxBytes = n * (s.EndsWith("mb") ? 1024 * 1024 : 1024);
+                    }
                     else int.TryParse(s, out q);
                 }
                 OutFormat f = OutFormat.FromExt(Path.GetExtension(a[2]));
                 if (f == null || !f.IsAvailable) return 2;
-                Converter.ConvertFile(a[1], a[2], f, q, mode, w, h);
+                ConvertResult r = Converter.ConvertFile(a[1], a[2], f, q, mode, w, h, maxBytes);
+                if (maxBytes > 0)
+                    File.WriteAllText(a[2] + ".result.txt", "quality=" + r.Quality + " size=" + r.Size.Width + "x" + r.Size.Height +
+                                      " downscaled=" + r.Downscaled + " missed=" + r.MissedTarget + " bytes=" + new FileInfo(a[2]).Length);
                 return 0;
             }
             catch (Exception ex)
@@ -134,16 +143,21 @@ namespace ImageConverter
         static int Screenshot(string[] a)
         {
             Theme.SaveDisabled = true;
-            bool light = false, wide = false, switchLang = false, spamTheme = false; string convertDir = null;
+            bool light = false, wide = false, switchLang = false, spamTheme = false; string convertDir = null, testExt = ".heic";
+            int limitKb = 0;
+            bool narrow = false;
             List<string> files = new List<string>();
             for (int i = 2; i < a.Length; i++)
             {
                 if (a[i] == "--light") light = true;
                 else if (a[i] == "--wide") wide = true;
+                else if (a[i] == "--narrow") narrow = true;
                 else if (a[i] == "--en") Lang.En = true;
                 else if (a[i] == "--switch-lang") switchLang = true;
                 else if (a[i] == "--spam-theme") spamTheme = true;
                 else if (a[i] == "--convert" && i + 1 < a.Length) convertDir = a[++i];
+                else if (a[i] == "--limit-kb" && i + 1 < a.Length) limitKb = int.Parse(a[++i]);
+                else if (a[i] == "--format" && i + 1 < a.Length) testExt = a[++i];
                 else files.Add(a[i]);
             }
             Theme.Apply(!light);
@@ -154,11 +168,12 @@ namespace ImageConverter
                 f.ShowInTaskbar = false;
                 f.Show();
                 if (wide) f.Width = f.Width * 3 / 2;
+                if (narrow) f.Width = f.MinimumSize.Width;
                 Stopwatch sw = Stopwatch.StartNew();
                 while (!f.ThumbsReady && sw.ElapsedMilliseconds < 20000) { Application.DoEvents(); Thread.Sleep(15); }
                 if (convertDir != null)
                 {
-                    f.TestConvert(convertDir);
+                    f.TestConvert(convertDir, testExt, limitKb);
                     while (f.Busy && sw.ElapsedMilliseconds < 120000) { Application.DoEvents(); Thread.Sleep(15); }
                 }
                 while (!f.ThumbsReady && sw.ElapsedMilliseconds < 120000) { Application.DoEvents(); Thread.Sleep(15); }
@@ -850,6 +865,8 @@ namespace ImageConverter
         public Size Dims;
         public bool Unreadable, Removed, InfoPending;
         public long Bytes, OutBytes, SrcBytes;
+        public ConvertResult Result;       // results list: what the size limit did (null when no limit was set)
+        public long LimitBytes;
         public Bitmap Thumb;
         public int State;          // sources: 0 idle, 1 queued, 2 working, 3 done, 4 error
         public string OutPath, Error;
@@ -967,7 +984,12 @@ namespace ImageConverter
             else
             {
                 meta = en.Dims.Width + " × " + en.Dims.Height;
-                if (Results) meta += " · " + System.IO.Path.GetExtension(en.Path).TrimStart('.').ToUpperInvariant() + Lang.T(" · было ", " · was ") + Gfx.Bytes(en.SrcBytes);
+                if (Results)
+                {
+                    meta += " · " + System.IO.Path.GetExtension(en.Path).TrimStart('.').ToUpperInvariant();
+                    if (en.Result != null && en.Result.Quality > 0) meta += Lang.T(" · качество ", " · quality ") + en.Result.Quality;
+                    meta += Lang.T(" · было ", " · was ") + Gfx.Bytes(en.SrcBytes);
+                }
                 else meta += " · " + Gfx.Bytes(en.Bytes);
             }
             Gfx.Draw(g, meta, smallFont, bot, Theme.Muted, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis);
@@ -1020,9 +1042,12 @@ namespace ImageConverter
                 Gfx.Draw(g, pill, smallFont, Rectangle.Round(pr), pc, Gfx.Center);
             }
             string size = Gfx.Bytes(en.Bytes);
+            bool missed = en.Result != null && en.Result.MissedTarget;
             Size ts = Gfx.Measure(size, boldFont);
             int x = (int)(r.Right - pillW - (pillW > 0 ? 10 * k : 0) - ts.Width);
-            Gfx.Draw(g, size, boldFont, new Rectangle(x, r.Y, ts.Width + 4, r.Height), Theme.Text, Gfx.LeftMid);
+            Gfx.Draw(g, size, boldFont, new Rectangle(x, r.Y, ts.Width + 4, r.Height), missed ? Theme.Danger : Theme.Text, Gfx.LeftMid);
+            if (missed || (en.Result != null && en.Result.Downscaled))
+                Gfx.Draw(g, Glyph.Error, Gfx.Icons(9f), new Rectangle(x - (int)(20 * k), r.Y, (int)(16 * k), r.Height), missed ? Theme.Danger : Theme.Muted, Gfx.Center);
         }
     }
 
@@ -1190,7 +1215,9 @@ namespace ImageConverter
         SelectBox cbFormat, cbSize;
         NumBox numQuality, numW, numH;
         Label lblQuality, lblWH, lblTitle, lblSub, lblSrcTitle, lblOutTitle, lblFormat, lblSize;
-        ToggleCheck chkNextTo;
+        ToggleCheck chkNextTo, chkMaxSize;
+        NumBox numMaxKb;
+        Label lblKb, lblPrivacy;
         InputBox txtOut;
         FlatButton btnAdd, btnAddDir, btnLang, btnTheme, btnRemove, btnClear, btnOpenDir, btnClearOut, btnOut, btnGo;
         int doneOk = -1, doneTotal;   // last finished run, to re-word the status line when the language changes
@@ -1214,7 +1241,7 @@ namespace ImageConverter
             Font = new Font("Segoe UI", 9.5f);
             AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(S(1200), S(760));
-            MinimumSize = new Size(S(980), S(660));
+            MinimumSize = new Size(S(1080), S(660));
             StartPosition = FormStartPosition.CenterScreen;
             Padding = new Padding(S(18));
             AllowDrop = true;
@@ -1358,6 +1385,16 @@ namespace ImageConverter
             grid.Controls.Add(lblSize, 0, 1); grid.Controls.Add(cbSize, 1, 1);
             grid.Controls.Add(lblWH, 2, 1); grid.Controls.Add(wh, 3, 1);
 
+            // size limit (lossy formats) and the privacy note
+            chkMaxSize = new ToggleCheck("") { Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), S(8), S(4)) };
+            numMaxKb = new NumBox(1, 1000000, 500) { Size = new Size(S(84), S(36)), Step = 50, Margin = new Padding(0, S(4), 0, S(4)) };
+            lblKb = new TLabel { AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(S(6), S(4), 0, S(4)) };
+            FlowLayoutPanel limit = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Left, Margin = new Padding(S(20), 0, 0, 0) };
+            limit.Controls.AddRange(new Control[] { chkMaxSize, numMaxKb, lblKb });
+            grid.Controls.Add(limit, 4, 0);
+            lblPrivacy = new TLabel { AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(S(20), 0, 0, 0) };
+            grid.Controls.Add(lblPrivacy, 4, 1);
+
             TableLayoutPanel outRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, S(8), 0, 0) };
             outRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             outRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -1398,6 +1435,7 @@ namespace ImageConverter
             cbFormat.Opening += delegate { RefreshFormats(); };
             cbSize.SelectedIndexChanged += delegate { SyncEnabled(); };
             chkNextTo.CheckedChanged += delegate { SyncEnabled(); };
+            chkMaxSize.CheckedChanged += delegate { ApplyQualityLabel(); SyncEnabled(); };
             btnOut.Click += delegate { ChooseOutDir(); };
             btnGo.Click += delegate { Start(); };
 
@@ -1454,7 +1492,14 @@ namespace ImageConverter
             btnClearOut.Text = Lang.T("Очистить", "Clear");
             lblFormat.Text = Lang.T("Формат", "Format");
             lblSize.Text = Lang.T("Размер", "Size");
-            lblQuality.Text = Lang.T("Качество", "Quality");
+            ApplyQualityLabel();
+            chkMaxSize.Text = Lang.T("Вес не больше", "Max file size");
+            lblKb.Text = Lang.T("КБ", "KB");
+            lblPrivacy.Text = Lang.T("EXIF (GPS, дата, камера) удаляется", "EXIF (GPS, date, camera) is removed");
+            tips.SetToolTip(chkMaxSize, Lang.T("Подбирает качество, а если не хватает — уменьшает картинку, чтобы файл уложился в заданный вес",
+                                               "Picks the quality and, if that isn't enough, shrinks the picture so the file fits the limit"));
+            tips.SetToolTip(lblPrivacy, Lang.T("Картинка пересохраняется с нуля: EXIF с координатами, датой съёмки и моделью камеры в новый файл не попадает",
+                                               "Images are re-encoded from scratch: EXIF with location, capture date and camera model is not written to the new file"));
             lblWH.Text = Lang.T("Ширина × высота", "Width × height");
             chkNextTo.Text = Lang.T("Сохранять рядом с исходником", "Save next to the original");
             btnOut.Text = Lang.T("Выбрать папку", "Choose folder");
@@ -1474,7 +1519,7 @@ namespace ImageConverter
             tips.SetToolTip(btnOpenDir, Lang.T("Открыть папку с последними готовыми файлами", "Open the folder with the latest converted files"));
             tips.SetToolTip(btnLang, Lang.En ? "Русский" : "English");
             tips.SetToolTip(btnTheme, Theme.Dark ? Lang.T("Светлая тема", "Light theme") : Lang.T("Тёмная тема", "Dark theme"));
-            foreach (ListViewItem it in outList.Items) it.ToolTipText = ((Entry)it.Tag).Path + Lang.T("\nДвойной щелчок — открыть", "\nDouble-click to open");
+            foreach (ListViewItem it in outList.Items) it.ToolTipText = ResultTip((Entry)it.Tag);
             foreach (ListViewItem it in srcList.Items) it.ToolTipText = SourceTip((Entry)it.Tag);
 
             if (!busy && statusLocked && doneOk >= 0) status.Text = DoneMessage(doneOk, doneTotal);
@@ -1571,6 +1616,29 @@ namespace ImageConverter
         {
             base.OnResize(e);
             if (activeFade != null) activeFade.Finish();             // snapshots no longer match the window
+        }
+
+        // with a size limit the quality box is the upper bound of the search
+        void ApplyQualityLabel()
+        {
+            lblQuality.Text = chkMaxSize.Checked ? Lang.T("Качество до", "Quality up to") : Lang.T("Качество", "Quality");
+            if (lblQuality.Parent != null) lblQuality.Parent.PerformLayout();
+        }
+
+        static string ResultTip(Entry en)
+        {
+            string tip = en.Path;
+            ConvertResult r = en.Result;
+            if (r != null && en.LimitBytes > 0)
+            {
+                if (r.MissedTarget)
+                    tip += Lang.T("\nНе удалось уложиться в ", "\nCouldn't fit into ") + Gfx.Bytes(en.LimitBytes) +
+                           Lang.T(": это самый маленький вариант (", ": this is the smallest attempt (") + r.Size.Width + "×" + r.Size.Height + ")";
+                else if (r.Downscaled)
+                    tip += Lang.T("\nУменьшено до ", "\nShrunk to ") + r.Size.Width + "×" + r.Size.Height +
+                           Lang.T(", чтобы уложиться в ", " to fit into ") + Gfx.Bytes(en.LimitBytes);
+            }
+            return tip + Lang.T("\nДвойной щелчок — открыть", "\nDouble-click to open");
         }
 
         static string SourceTip(Entry en)
@@ -1670,6 +1738,9 @@ namespace ImageConverter
             bool q = f != null && f.HasQuality;
             numQuality.SetDimmed(!q || busy);
             lblQuality.ForeColor = q ? Theme.Muted : Theme.Mix(Theme.Muted, Theme.Surface, 0.55);
+            chkMaxSize.Enabled = q && !busy;                          // size limit only makes sense for lossy formats
+            numMaxKb.SetDimmed(!q || !chkMaxSize.Checked || busy);
+            lblKb.ForeColor = q && chkMaxSize.Checked ? Theme.Muted : Theme.Mix(Theme.Muted, Theme.Surface, 0.55);
             bool sized = cbSize.SelectedIndex > 0;
             numW.SetDimmed(!sized || busy); numH.SetDimmed(!sized || busy);
             lblWH.ForeColor = sized ? Theme.Muted : Theme.Mix(Theme.Muted, Theme.Surface, 0.55);
@@ -1795,10 +1866,11 @@ namespace ImageConverter
             QueueInfo(srcList, en, it);
         }
 
-        void AddResult(string outPath, long outBytes, long srcBytes)
+        void AddResult(string outPath, long outBytes, long srcBytes, ConvertResult result, long limitBytes)
         {
-            Entry en = new Entry { Path = outPath, Bytes = outBytes, SrcBytes = srcBytes, State = 3, InfoPending = true };
-            ListViewItem it = new ListViewItem(Path.GetFileName(en.Path)) { Tag = en, ToolTipText = en.Path + Lang.T("\nДвойной щелчок — открыть", "\nDouble-click to open") };
+            Entry en = new Entry { Path = outPath, Bytes = outBytes, SrcBytes = srcBytes, State = 3, InfoPending = true,
+                                   Result = limitBytes > 0 ? result : null, LimitBytes = limitBytes };
+            ListViewItem it = new ListViewItem(Path.GetFileName(en.Path)) { Tag = en, ToolTipText = ResultTip(en) };
             outList.Items.Add(it);
             outList.EnsureVisible(it.Index);
             QueueInfo(outList, en, it);
@@ -1911,10 +1983,11 @@ namespace ImageConverter
             return (p.X - Left) + "," + (p.Y - Top) + "," + c.Width + "," + c.Height;
         }
 
-        public void TestConvert(string dir)
+        public void TestConvert(string dir, string ext, int limitKb)
         {
             for (int i = 0; i < cbFormat.Items.Count; i++)
-                if (((OutFormat)cbFormat.Items[i]).Ext == ".heic") cbFormat.SelectedIndex = i;
+                if (((OutFormat)cbFormat.Items[i]).Ext == ext) cbFormat.SelectedIndex = i;
+            if (limitKb > 0) { chkMaxSize.Checked = true; numMaxKb.Value = limitKb; }
             chkNextTo.Checked = false;
             txtOut.Box.Text = dir;
             Start();
@@ -1936,6 +2009,7 @@ namespace ImageConverter
             }
             OutFormat fmt = (OutFormat)cbFormat.SelectedItem;
             int quality = numQuality.Value, mode = cbSize.SelectedIndex, W = numW.Value, H = numH.Value;
+            long maxBytes = fmt.HasQuality && chkMaxSize.Checked ? numMaxKb.Value * 1024L : 0;
             string suffix = mode > 0 ? " " + W + "x" + H : "";
             List<ListViewItem> items = srcList.Items.Cast<ListViewItem>().ToList();
             foreach (ListViewItem it in items)
@@ -1965,10 +2039,11 @@ namespace ImageConverter
                     Ui(delegate { InvalidateItem(it); status.Text = Lang.T("Конвертирую ", "Converting ") + name + "…"; });
 
                     bool success = false; string outPath = null, error = null; long outBytes = 0;
+                    ConvertResult result = null;
                     try
                     {
                         outPath = Converter.MakeOutputPath(en.Path, outDir, fmt, suffix);
-                        Converter.ConvertFile(en.Path, outPath, fmt, quality, mode, W, H);
+                        result = Converter.ConvertFile(en.Path, outPath, fmt, quality, mode, W, H, maxBytes);
                         outBytes = new FileInfo(outPath).Length;
                         success = true;
                         ok++;
@@ -1987,7 +2062,7 @@ namespace ImageConverter
                     {
                         it.ToolTipText = SourceTip(en);
                         InvalidateItem(it);
-                        if (success) { AddResult(outPath, outBytes, srcBytes); lastOutDir = dirNow; UpdateState(); }
+                        if (success) { AddResult(outPath, outBytes, srcBytes, result, maxBytes); lastOutDir = dirNow; UpdateState(); }
                         progress.Value = (float)d / total;
                     });
                 }

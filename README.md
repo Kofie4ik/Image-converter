@@ -18,6 +18,8 @@ A small Windows app: drop images in and get them back in the format and size you
 - **Opens:** JPG, PNG, WebP, HEIC/HEIF, AVIF, JPEG XL, camera RAW (CR2, CR3, NEF, ARW, DNG and more), BMP, GIF, TIFF, ICO, DDS
 - **Saves:** PNG, JPG, HEIC, JPEG XR, BMP, TIFF, GIF (adjustable quality for JPG, HEIC and JPEG XR)
 - **Resize:** keep original, fill with cropping, fit with borders or stretch — e.g. for a 3440×1440 ultrawide monitor
+- **Max file size:** set a limit like 500 KB — the app picks the best quality that fits and shrinks the picture only if that isn't enough (JPG, HEIC, JPEG XR)
+- **Privacy:** EXIF metadata (location, capture date, camera model) is never copied to the converted file
 - Drag files and whole folders (with subfolders) straight into the window
 - Thumbnails, resolution and file size before/after for every file
 - Rotates phone photos according to EXIF
@@ -59,10 +61,12 @@ Windows has no built-in encoders for these formats. Put the official command-lin
 ## Command line
 
 ```bat
-ImageConverter.exe --cli "input.jpg" "output.heic" [WxH] [fill|fit|stretch] [quality]
+ImageConverter.exe --cli "input.jpg" "output.heic" [WxH] [fill|fit|stretch] [quality] [500kb|2mb]
 ```
 
-Example: `ImageConverter.exe --cli photo.png wallpaper.jpg 3440x1440 fill 92`
+Examples:
+- `ImageConverter.exe --cli photo.png wallpaper.jpg 3440x1440 fill 92`
+- `ImageConverter.exe --cli photo.heic small.jpg 90 300kb` — quality up to 90, file no bigger than 300 KB
 
 ## Language
 
