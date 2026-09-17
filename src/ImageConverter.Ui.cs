@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -15,6 +16,22 @@ using System.Windows.Forms;
 
 namespace ImageConverter
 {
+    // UI language: Russian or English. Every visible string goes through T(ru, en).
+    static class Lang
+    {
+        public static bool En;
+
+        public static string T(string ru, string en) { return En ? en : ru; }
+
+        public static bool SystemPrefersEnglish()
+        {
+            string l = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+            return !(l == "ru" || l == "uk" || l == "be" || l == "kk");
+        }
+
+        public static CultureInfo Numbers { get { return En ? CultureInfo.InvariantCulture : CultureInfo.CurrentCulture; } }
+    }
+
     static class Native
     {
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
@@ -35,6 +52,7 @@ namespace ImageConverter
             if (args.Length >= 2 && args[0] == "--make-icon") return MakeIcon(args[1]);
             if (args.Length >= 2 && args[0] == "--screenshot") return Screenshot(args);
             Theme.Apply(Theme.LoadDark());
+            Lang.En = Theme.LoadEnglish();
             Application.Run(new MainForm(args));
             return 0;
         }
@@ -107,12 +125,14 @@ namespace ImageConverter
         // --screenshot <out.png> [--light] [--convert <dir>] [files...]: render the window to a PNG (layout check)
         static int Screenshot(string[] a)
         {
-            bool light = false, wide = false; string convertDir = null;
+            bool light = false, wide = false, switchLang = false; string convertDir = null;
             List<string> files = new List<string>();
             for (int i = 2; i < a.Length; i++)
             {
                 if (a[i] == "--light") light = true;
                 else if (a[i] == "--wide") wide = true;
+                else if (a[i] == "--en") Lang.En = true;
+                else if (a[i] == "--switch-lang") switchLang = true;
                 else if (a[i] == "--convert" && i + 1 < a.Length) convertDir = a[++i];
                 else files.Add(a[i]);
             }
@@ -132,6 +152,7 @@ namespace ImageConverter
                     while (f.Busy && sw.ElapsedMilliseconds < 120000) { Application.DoEvents(); Thread.Sleep(15); }
                 }
                 while (!f.ThumbsReady && sw.ElapsedMilliseconds < 120000) { Application.DoEvents(); Thread.Sleep(15); }
+                if (switchLang) { Lang.En = !Lang.En; f.RefreshLanguage(); }
                 for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(10); }
                 File.WriteAllText(a[1] + ".txt", f.DebugReport());
                 using (Bitmap b = new Bitmap(f.Width, f.Height))
@@ -196,11 +217,34 @@ namespace ImageConverter
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ImageConverter", "settings.ini"); }
         }
 
+        // settings.ini: "key=value" lines (theme, lang)
+        static Dictionary<string, string> ReadSettings()
+        {
+            Dictionary<string, string> d = new Dictionary<string, string>();
+            try
+            {
+                if (File.Exists(SettingsPath))
+                    foreach (string line in File.ReadAllLines(SettingsPath))
+                    {
+                        int eq = line.IndexOf('=');
+                        if (eq > 0) d[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+                    }
+            }
+            catch { }
+            return d;
+        }
+
         public static bool LoadDark()
         {
-            try { if (File.Exists(SettingsPath)) return !File.ReadAllText(SettingsPath).Contains("theme=light"); }
-            catch { }
-            return true;
+            string v;
+            return !(ReadSettings().TryGetValue("theme", out v) && v == "light");
+        }
+
+        public static bool LoadEnglish()
+        {
+            string v;
+            if (ReadSettings().TryGetValue("lang", out v)) return v == "en";
+            return Lang.SystemPrefersEnglish();
         }
 
         public static void Save()
@@ -208,7 +252,7 @@ namespace ImageConverter
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath));
-                File.WriteAllText(SettingsPath, "theme=" + (Dark ? "dark" : "light"));
+                File.WriteAllText(SettingsPath, "theme=" + (Dark ? "dark" : "light") + "\r\nlang=" + (Lang.En ? "en" : "ru") + "\r\n");
             }
             catch { }
         }
@@ -261,9 +305,9 @@ namespace ImageConverter
 
         public static string Bytes(long n)
         {
-            if (n < 1024) return n + " Б";
-            if (n < 1024 * 1024) return (n / 1024.0).ToString("0") + " КБ";
-            return (n / 1048576.0).ToString("0.0") + " МБ";
+            if (n < 1024) return n + Lang.T(" Б", " B");
+            if (n < 1024 * 1024) return (n / 1024.0).ToString("0", Lang.Numbers) + Lang.T(" КБ", " KB");
+            return (n / 1048576.0).ToString("0.0", Lang.Numbers) + Lang.T(" МБ", " MB");
         }
 
         public const TextFormatFlags Center = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter;
@@ -704,7 +748,7 @@ namespace ImageConverter
 
             if (Compact)
             {
-                const string t = "Перетащите ещё или нажмите, чтобы добавить";
+                string t = Lang.T("Перетащите ещё или нажмите, чтобы добавить", "Drop more here or click to add");
                 Size ts = Gfx.Measure(t, Font);
                 int gw = (int)(26 * k), x = (Width - ts.Width - gw) / 2;
                 Gfx.Draw(g, "", Gfx.Icons(11f), new Rectangle(x, 0, (int)(18 * k), Height), Theme.Accent, Gfx.Center);
@@ -719,9 +763,9 @@ namespace ImageConverter
             using (SolidBrush b = new SolidBrush(Theme.Mix(Theme.Surface, Theme.Accent, active ? 0.24 : 0.15))) g.FillEllipse(b, circ);
             Gfx.Draw(g, "", Gfx.Icons(22f), Rectangle.Round(circ), Theme.Accent, Gfx.Center);
             Rectangle t1 = new Rectangle(0, (int)(circ.Bottom + 12 * k), Width, (int)(28 * k));
-            Gfx.Draw(g, "Перетащите картинки или папки сюда", titleFont, t1, Theme.Text, Gfx.Center);
+            Gfx.Draw(g, Lang.T("Перетащите картинки или папки сюда", "Drop images or folders here"), titleFont, t1, Theme.Text, Gfx.Center);
             Rectangle t2 = new Rectangle(0, t1.Bottom, Width, (int)(24 * k));
-            Gfx.Draw(g, "или нажмите, чтобы выбрать файлы", Font, t2, Theme.Muted, Gfx.Center);
+            Gfx.Draw(g, Lang.T("или нажмите, чтобы выбрать файлы", "or click to choose files"), Font, t2, Theme.Muted, Gfx.Center);
             Rectangle t3 = new Rectangle(0, t2.Bottom + (int)(8 * k), Width, (int)(20 * k));
             Gfx.Draw(g, "JPG · PNG · WebP · HEIC · AVIF · JPEG XL · RAW · BMP · GIF · TIFF", smallFont, t3, Theme.Mix(Theme.Muted, Theme.Surface, 0.3), Gfx.Center);
         }
@@ -879,12 +923,12 @@ namespace ImageConverter
             Rectangle bot = new Rectangle(text.X, text.Y + text.Height / 2 + (int)(1 * k), text.Width, lh);
             Gfx.Draw(g, System.IO.Path.GetFileName(en.Path), boldFont, top, Theme.Text, TextFormatFlags.Left | TextFormatFlags.Bottom | TextFormatFlags.EndEllipsis);
             string meta;
-            if (en.InfoPending) meta = "читаю… · " + Gfx.Bytes(en.Bytes);
-            else if (en.Unreadable) meta = "не удаётся открыть · " + Gfx.Bytes(en.Bytes);
+            if (en.InfoPending) meta = Lang.T("читаю…", "reading…") + " · " + Gfx.Bytes(en.Bytes);
+            else if (en.Unreadable) meta = Lang.T("не удаётся открыть", "can't be opened") + " · " + Gfx.Bytes(en.Bytes);
             else
             {
                 meta = en.Dims.Width + " × " + en.Dims.Height;
-                if (Results) meta += " · " + System.IO.Path.GetExtension(en.Path).TrimStart('.').ToUpperInvariant() + " · было " + Gfx.Bytes(en.SrcBytes);
+                if (Results) meta += " · " + System.IO.Path.GetExtension(en.Path).TrimStart('.').ToUpperInvariant() + Lang.T(" · было ", " · was ") + Gfx.Bytes(en.SrcBytes);
                 else meta += " · " + Gfx.Bytes(en.Bytes);
             }
             Gfx.Draw(g, meta, smallFont, bot, Theme.Muted, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis);
@@ -908,11 +952,11 @@ namespace ImageConverter
             Color c = Theme.Muted;
             switch (en.State)
             {
-                case 1: glyph = Glyph.Clock; text = "В очереди"; break;
-                case 2: glyph = Glyph.Sync; text = "Конвертирую…"; c = Theme.Accent; break;
-                case 3: glyph = Glyph.Check; text = "Готово"; c = Theme.Success; break;
-                case 4: glyph = Glyph.Error; text = "Ошибка"; c = Theme.Danger; break;
-                default: if (en.Unreadable) { glyph = Glyph.Error; text = "Не открывается"; c = Theme.Danger; } break;
+                case 1: glyph = Glyph.Clock; text = Lang.T("В очереди", "Queued"); break;
+                case 2: glyph = Glyph.Sync; text = Lang.T("Конвертирую…", "Converting…"); c = Theme.Accent; break;
+                case 3: glyph = Glyph.Check; text = Lang.T("Готово", "Done"); c = Theme.Success; break;
+                case 4: glyph = Glyph.Error; text = Lang.T("Ошибка", "Error"); c = Theme.Danger; break;
+                default: if (en.Unreadable) { glyph = Glyph.Error; text = Lang.T("Не открывается", "Can't open"); c = Theme.Danger; } break;
             }
             if (text == null) return;
             Size ts = Gfx.Measure(text, Font);
@@ -956,9 +1000,9 @@ namespace ImageConverter
             using (SolidBrush b = new SolidBrush(Theme.Mix(Theme.Surface, Theme.Text, Theme.Dark ? 0.06 : 0.05))) g.FillEllipse(b, circ);
             Gfx.Draw(g, Glyph.Photo, Gfx.Icons(18f), Rectangle.Round(circ), Theme.Muted, Gfx.Center);
             Rectangle t1 = new Rectangle(0, (int)(circ.Bottom + 12 * k), Width, (int)(26 * k));
-            Gfx.Draw(g, "Здесь появятся готовые файлы", titleFont, t1, Theme.Text, Gfx.Center);
+            Gfx.Draw(g, Lang.T("Здесь появятся готовые файлы", "Converted files will appear here"), titleFont, t1, Theme.Text, Gfx.Center);
             Rectangle t2 = new Rectangle(0, t1.Bottom, Width, (int)(22 * k));
-            Gfx.Draw(g, "Двойной щелчок по картинке — открыть её", Font, t2, Theme.Muted, Gfx.Center);
+            Gfx.Draw(g, Lang.T("Двойной щелчок по картинке — открыть её", "Double-click an image to open it"), Font, t2, Theme.Muted, Gfx.Center);
         }
     }
 
@@ -1021,10 +1065,11 @@ namespace ImageConverter
         Label srcCount, outCount, status;
         SelectBox cbFormat, cbSize;
         NumBox numQuality, numW, numH;
-        Label lblQuality, lblWH;
+        Label lblQuality, lblWH, lblTitle, lblSub, lblSrcTitle, lblOutTitle, lblFormat, lblSize;
         ToggleCheck chkNextTo;
         InputBox txtOut;
-        FlatButton btnAdd, btnAddDir, btnTheme, btnRemove, btnClear, btnOpenDir, btnClearOut, btnOut, btnGo;
+        FlatButton btnAdd, btnAddDir, btnLang, btnTheme, btnRemove, btnClear, btnOpenDir, btnClearOut, btnOut, btnGo;
+        int doneOk = -1, doneTotal;   // last finished run, to re-word the status line when the language changes
         ProgressLine progress;
         readonly ToolTip tips = new ToolTip();
         readonly HashSet<string> known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1042,7 +1087,6 @@ namespace ImageConverter
         public MainForm(string[] args)
         {
             k = DeviceDpi / 96f;
-            Text = "Конвертер картинок";
             Font = new Font("Segoe UI", 9.5f);
             AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(S(1200), S(760));
@@ -1053,6 +1097,7 @@ namespace ImageConverter
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             BuildUi();
+            ApplyLanguage();
             ApplyTheme();
 
             DragEnter += OnDragEnter; DragDrop += OnDragDrop; DragLeave += delegate { drop.DragActive = false; };
@@ -1071,17 +1116,17 @@ namespace ImageConverter
         }
 
         // card = header row (title, counter, buttons) + body
-        TableLayoutPanel CardHeader(string title, out Label counter, params Control[] buttons)
+        TableLayoutPanel CardHeader(out Label title, out Label counter, params Control[] buttons)
         {
             TableLayoutPanel h = new TableLayoutPanel { Dock = DockStyle.Top, Height = S(44), ColumnCount = 3, RowCount = 1, Padding = new Padding(S(10), 0, S(4), 0) };
             h.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             h.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             h.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            Label t = new Label { Text = title, AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(10), 0) };
+            title = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(10), 0) };
             counter = new Label { AutoSize = false, AutoEllipsis = true, Tag = "muted", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, S(2), S(6), 0) };
             FlowLayoutPanel f = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = new Padding(0) };
             f.Controls.AddRange(buttons);
-            h.Controls.Add(t, 0, 0); h.Controls.Add(counter, 1, 0); h.Controls.Add(f, 2, 0);
+            h.Controls.Add(title, 0, 0); h.Controls.Add(counter, 1, 0); h.Controls.Add(f, 2, 0);
             return h;
         }
 
@@ -1103,14 +1148,15 @@ namespace ImageConverter
             head.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             LogoMark logo = new LogoMark { Size = new Size(S(42), S(42)), Margin = new Padding(0, 0, S(12), 0), Anchor = AnchorStyles.Left };
             Panel titles = new Panel { Size = new Size(S(320), S(46)), Margin = new Padding(0), Anchor = AnchorStyles.Left };
-            Label title = new Label { Text = "Конвертер картинок", AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), Location = new Point(-S(2), -S(1)) };
-            Label sub = new Label { Text = "Форматы, размер и сжатие — сразу пачкой", AutoSize = true, Tag = "muted", Location = new Point(0, S(26)) };
-            titles.Controls.Add(title); titles.Controls.Add(sub);
+            lblTitle = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), Location = new Point(-S(2), -S(1)) };
+            lblSub = new Label { AutoSize = true, Tag = "muted", Location = new Point(0, S(26)) };
+            titles.Controls.Add(lblTitle); titles.Controls.Add(lblSub);
             FlowLayoutPanel tools = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = new Padding(0) };
-            btnAdd = new FlatButton("Файлы", Glyph.Add, FlatButton.Kinds.Secondary);
-            btnAddDir = new FlatButton("Папка", Glyph.Folder, FlatButton.Kinds.Secondary);
-            btnTheme = new FlatButton("", Glyph.Sun, FlatButton.Kinds.Ghost) { Margin = new Padding(S(10), 3, 0, 3) };
-            tools.Controls.AddRange(new Control[] { btnAdd, btnAddDir, btnTheme });
+            btnAdd = new FlatButton("", Glyph.Add, FlatButton.Kinds.Secondary);
+            btnAddDir = new FlatButton("", Glyph.Folder, FlatButton.Kinds.Secondary);
+            btnLang = new FlatButton("", null, FlatButton.Kinds.Ghost) { Margin = new Padding(S(10), 3, 0, 3) };
+            btnTheme = new FlatButton("", Glyph.Sun, FlatButton.Kinds.Ghost) { Margin = new Padding(S(2), 3, 0, 3) };
+            tools.Controls.AddRange(new Control[] { btnAdd, btnAddDir, btnLang, btnTheme });
             head.Controls.Add(logo, 0, 0); head.Controls.Add(titles, 1, 0); head.Controls.Add(tools, 3, 0);
             root.Controls.Add(head, 0, 0);
 
@@ -1136,9 +1182,9 @@ namespace ImageConverter
 
             // left: sources
             srcCard = new RoundPanel { Dock = DockStyle.Fill, Padding = new Padding(S(6), S(4), S(6), S(8)) };
-            btnRemove = Small("Убрать", Glyph.Delete);
-            btnClear = Small("Очистить", Glyph.Clear);
-            TableLayoutPanel srcHead = CardHeader("Исходные", out srcCount, btnRemove, btnClear);
+            btnRemove = Small("", Glyph.Delete);
+            btnClear = Small("", Glyph.Clear);
+            TableLayoutPanel srcHead = CardHeader(out lblSrcTitle, out srcCount, btnRemove, btnClear);
             srcList = new FileList { Dock = DockStyle.Fill, AllowDrop = true };
             srcList.SetRowHeight(S(62));
             dropGap = new Panel { Dock = DockStyle.Top, Height = S(6) };
@@ -1148,9 +1194,9 @@ namespace ImageConverter
 
             // right: results
             outCard = new RoundPanel { Dock = DockStyle.Fill, Padding = new Padding(S(6), S(4), S(6), S(8)) };
-            btnOpenDir = Small("Открыть папку", Glyph.OpenFolder);
-            btnClearOut = Small("Очистить", Glyph.Clear);
-            TableLayoutPanel outHead = CardHeader("Готовые", out outCount, btnOpenDir, btnClearOut);
+            btnOpenDir = Small("", Glyph.OpenFolder);
+            btnClearOut = Small("", Glyph.Clear);
+            TableLayoutPanel outHead = CardHeader(out lblOutTitle, out outCount, btnOpenDir, btnClearOut);
             outList = new FileList { Dock = DockStyle.Fill, Results = true };
             outList.SetRowHeight(S(62));
             outEmpty = new EmptyHint { Dock = DockStyle.Fill };
@@ -1170,30 +1216,31 @@ namespace ImageConverter
             cbFormat = new SelectBox { Size = new Size(S(280), S(36)), Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), S(18), S(4)) };
             cbFormat.Items.AddRange(OutFormat.Available());
             cbFormat.SelectedIndex = 0;
-            lblQuality = L("Качество");
+            lblQuality = L("");
             numQuality = new NumBox(1, 100, 90) { Size = new Size(S(72), S(36)), Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), 0, S(4)) };
 
             cbSize = new SelectBox { Size = new Size(S(280), S(36)), Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), S(18), S(4)) };
-            cbSize.Items.AddRange(new object[] { "Как есть", "Заполнить (обрезать лишнее)", "Вписать (поля по краям)", "Растянуть" });
+            cbSize.Items.AddRange(SizeModes());
             cbSize.SelectedIndex = 0;
-            lblWH = L("Ширина × высота");
+            lblWH = L("");
             numW = new NumBox(1, 30000, 3440) { Size = new Size(S(84), S(36)), Step = 10, Margin = new Padding(0) };
             numH = new NumBox(1, 30000, 1440) { Size = new Size(S(84), S(36)), Step = 10, Margin = new Padding(0) };
             FlowLayoutPanel wh = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), 0, S(4)) };
             wh.Controls.AddRange(new Control[] { numW, new Label { Text = "×", AutoSize = true, Tag = "muted", Margin = new Padding(S(6), S(9), S(6), 0) }, numH });
 
-            grid.Controls.Add(L("Формат"), 0, 0); grid.Controls.Add(cbFormat, 1, 0);
+            lblFormat = L(""); lblSize = L("");
+            grid.Controls.Add(lblFormat, 0, 0); grid.Controls.Add(cbFormat, 1, 0);
             grid.Controls.Add(lblQuality, 2, 0); grid.Controls.Add(numQuality, 3, 0);
-            grid.Controls.Add(L("Размер"), 0, 1); grid.Controls.Add(cbSize, 1, 1);
+            grid.Controls.Add(lblSize, 0, 1); grid.Controls.Add(cbSize, 1, 1);
             grid.Controls.Add(lblWH, 2, 1); grid.Controls.Add(wh, 3, 1);
 
             TableLayoutPanel outRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, S(8), 0, 0) };
             outRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             outRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             outRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            chkNextTo = new ToggleCheck("Сохранять рядом с исходником") { Checked = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(12), 0) };
+            chkNextTo = new ToggleCheck("") { Checked = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(12), 0) };
             txtOut = new InputBox { Dock = DockStyle.Fill, Height = S(36), Margin = new Padding(0, S(1), S(8), S(1)) };
-            btnOut = new FlatButton("Выбрать папку", Glyph.Folder, FlatButton.Kinds.Secondary) { Anchor = AnchorStyles.Left, Margin = new Padding(0) };
+            btnOut = new FlatButton("", Glyph.Folder, FlatButton.Kinds.Secondary) { Anchor = AnchorStyles.Left, Margin = new Padding(0) };
             outRow.Controls.Add(chkNextTo, 0, 0); outRow.Controls.Add(txtOut, 1, 0); outRow.Controls.Add(btnOut, 2, 0);
             grid.Controls.Add(outRow, 0, 2); grid.SetColumnSpan(outRow, 5);
 
@@ -1205,7 +1252,7 @@ namespace ImageConverter
             TableLayoutPanel bottom = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, S(16), 0, 0) };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            btnGo = new FlatButton("Конвертировать", Glyph.Convert, FlatButton.Kinds.Primary) { HeightDip = 42, Anchor = AnchorStyles.Left, Margin = new Padding(0), Font = new Font("Segoe UI Semibold", 10f) };
+            btnGo = new FlatButton("", Glyph.Convert, FlatButton.Kinds.Primary) { HeightDip = 42, Anchor = AnchorStyles.Left, Margin = new Padding(0), Font = new Font("Segoe UI Semibold", 10f) };
             Panel mid = new Panel { Dock = DockStyle.Fill, Height = S(42), Margin = new Padding(S(18), 0, 0, 0), Padding = new Padding(0, S(2), 0, S(6)) };
             status = new Label { Dock = DockStyle.Top, Height = S(24), Tag = "muted", AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
             progress = new ProgressLine { Dock = DockStyle.Bottom, Height = S(6) };
@@ -1217,6 +1264,7 @@ namespace ImageConverter
             btnAdd.Click += delegate { AddFilesDialog(); };
             btnAddDir.Click += delegate { AddFolderDialog(); };
             btnTheme.Click += delegate { Theme.Apply(!Theme.Dark); Theme.Save(); ApplyTheme(); };
+            btnLang.Click += delegate { Lang.En = !Lang.En; Theme.Save(); ApplyLanguage(); };
             btnRemove.Click += delegate { RemoveSelected(srcList); };
             btnClear.Click += delegate { ClearList(srcList); };
             btnOpenDir.Click += delegate { if (lastOutDir != null) Process.Start("explorer.exe", "\"" + lastOutDir + "\""); };
@@ -1253,12 +1301,79 @@ namespace ImageConverter
                 lst.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Right) ShowItemMenu(lst, e.Location); };
             }
 
-            tips.SetToolTip(btnAdd, "Добавить картинки");
-            tips.SetToolTip(btnAddDir, "Добавить все картинки из папки (и вложенных)");
-            tips.SetToolTip(btnRemove, "Убрать выбранные из списка (Delete)");
-            tips.SetToolTip(btnClear, "Очистить список исходных");
-            tips.SetToolTip(btnClearOut, "Очистить список готовых (сами файлы останутся)");
-            tips.SetToolTip(btnOpenDir, "Открыть папку с последними готовыми файлами");
+        }
+
+        static object[] SizeModes()
+        {
+            return new object[] {
+                Lang.T("Как есть", "Keep original"),
+                Lang.T("Заполнить (обрезать лишнее)", "Fill (crop the overflow)"),
+                Lang.T("Вписать (поля по краям)", "Fit (add borders)"),
+                Lang.T("Растянуть", "Stretch") };
+        }
+
+        // every static text in the window; called at startup and when the language is switched
+        void ApplyLanguage()
+        {
+            SuspendLayout();
+            Text = Lang.T("Конвертер картинок", "Image Converter");
+            lblTitle.Text = Text;
+            lblSub.Text = Lang.T("Форматы, размер и сжатие — сразу пачкой", "Formats, size and compression — in batches");
+            btnAdd.Text = Lang.T("Файлы", "Files");
+            btnAddDir.Text = Lang.T("Папка", "Folder");
+            btnLang.Text = Lang.En ? "RU" : "EN";
+            lblSrcTitle.Text = Lang.T("Исходные", "Source");
+            lblOutTitle.Text = Lang.T("Готовые", "Converted");
+            btnRemove.Text = Lang.T("Убрать", "Remove");
+            btnClear.Text = Lang.T("Очистить", "Clear");
+            btnOpenDir.Text = Lang.T("Открыть папку", "Open folder");
+            btnClearOut.Text = Lang.T("Очистить", "Clear");
+            lblFormat.Text = Lang.T("Формат", "Format");
+            lblSize.Text = Lang.T("Размер", "Size");
+            lblQuality.Text = Lang.T("Качество", "Quality");
+            lblWH.Text = Lang.T("Ширина × высота", "Width × height");
+            chkNextTo.Text = Lang.T("Сохранять рядом с исходником", "Save next to the original");
+            btnOut.Text = Lang.T("Выбрать папку", "Choose folder");
+            btnGo.Text = Lang.T("Конвертировать", "Convert");
+
+            cbSize.Items.Clear();                        // the selected index is kept
+            cbSize.Items.AddRange(SizeModes());
+            cbSize.Invalidate();
+            cbFormat.Invalidate();                       // format names are localized in OutFormat.Name
+            chkNextTo.Parent.PerformLayout();
+
+            tips.SetToolTip(btnAdd, Lang.T("Добавить картинки", "Add images"));
+            tips.SetToolTip(btnAddDir, Lang.T("Добавить все картинки из папки (и вложенных)", "Add all images from a folder (and subfolders)"));
+            tips.SetToolTip(btnRemove, Lang.T("Убрать выбранные из списка (Delete)", "Remove selected from the list (Delete)"));
+            tips.SetToolTip(btnClear, Lang.T("Очистить список исходных", "Clear the source list"));
+            tips.SetToolTip(btnClearOut, Lang.T("Очистить список готовых (сами файлы останутся)", "Clear the converted list (files stay on disk)"));
+            tips.SetToolTip(btnOpenDir, Lang.T("Открыть папку с последними готовыми файлами", "Open the folder with the latest converted files"));
+            tips.SetToolTip(btnLang, Lang.En ? "Русский" : "English");
+            tips.SetToolTip(btnTheme, Theme.Dark ? Lang.T("Светлая тема", "Light theme") : Lang.T("Тёмная тема", "Dark theme"));
+            foreach (ListViewItem it in outList.Items) it.ToolTipText = ((Entry)it.Tag).Path + Lang.T("\nДвойной щелчок — открыть", "\nDouble-click to open");
+            foreach (ListViewItem it in srcList.Items) it.ToolTipText = SourceTip((Entry)it.Tag);
+
+            if (!busy && statusLocked && doneOk >= 0) status.Text = DoneMessage(doneOk, doneTotal);
+            ResumeLayout(true);
+            UpdateState();
+            Invalidate(true);
+        }
+
+        public void RefreshLanguage() { ApplyLanguage(); }
+
+        static string SourceTip(Entry en)
+        {
+            if (en.State == 3) return Lang.T("Сохранено: ", "Saved: ") + en.OutPath;
+            if (en.State == 4) return Lang.T("Ошибка: ", "Error: ") + en.Error;
+            return en.Path;
+        }
+
+        static string DoneMessage(int ok, int total)
+        {
+            int failed = total - ok;
+            string msg = Lang.T("Готово: ", "Done: ") + ok + Lang.T(" из ", " of ") + total;
+            if (failed > 0) msg += Lang.T(" · ошибок: ", " · errors: ") + failed + Lang.T(" (наведите на строку, чтобы увидеть причину)", " (hover a row to see why)");
+            return msg;
         }
 
         protected override void OnShown(EventArgs e) { base.OnShown(e); ApplyRatio(); }
@@ -1289,7 +1404,7 @@ namespace ImageConverter
             BackColor = Theme.Bg; ForeColor = Theme.Text;
             Walk(this, Theme.Bg);
             btnTheme.Glyph = Theme.Dark ? Glyph.Sun : Glyph.Moon;
-            tips.SetToolTip(btnTheme, Theme.Dark ? "Светлая тема" : "Тёмная тема");
+            tips.SetToolTip(btnTheme, Theme.Dark ? Lang.T("Светлая тема", "Light theme") : Lang.T("Тёмная тема", "Dark theme"));
             ApplyChrome();
             SyncEnabled();
             Invalidate(true);
@@ -1385,7 +1500,8 @@ namespace ImageConverter
                 outCount.Text = outList.Items.Count + " · " + Gfx.Bytes(was) + " → " + Gfx.Bytes(now);
             }
             if (!busy && !statusLocked)
-                status.Text = srcEmpty ? "Добавьте картинки, чтобы начать" : "Выберите формат и нажмите «Конвертировать»";
+                status.Text = srcEmpty ? Lang.T("Добавьте картинки, чтобы начать", "Add some images to get started")
+                                       : Lang.T("Выберите формат и нажмите «Конвертировать»", "Pick a format and press “Convert”");
             SyncEnabled();
         }
 
@@ -1408,8 +1524,8 @@ namespace ImageConverter
             using (OpenFileDialog d = new OpenFileDialog())
             {
                 d.Multiselect = true;
-                d.Title = "Выберите картинки";
-                d.Filter = "Картинки|" + string.Join(";", Converter.InputExt.Select(x => "*" + x)) + "|Все файлы|*.*";
+                d.Title = Lang.T("Выберите картинки", "Choose images");
+                d.Filter = Lang.T("Картинки", "Images") + "|" + string.Join(";", Converter.InputExt.Select(x => "*" + x)) + "|" + Lang.T("Все файлы", "All files") + "|*.*";
                 if (d.ShowDialog(this) == DialogResult.OK) AddPaths(d.FileNames);
             }
         }
@@ -1418,7 +1534,7 @@ namespace ImageConverter
         {
             using (FolderBrowserDialog d = new FolderBrowserDialog())
             {
-                d.Description = "Папка с картинками (вложенные папки тоже)";
+                d.Description = Lang.T("Папка с картинками (вложенные папки тоже)", "Folder with images (subfolders included)");
                 if (d.ShowDialog(this) == DialogResult.OK) AddPaths(new[] { d.SelectedPath });
             }
         }
@@ -1427,7 +1543,7 @@ namespace ImageConverter
         {
             using (FolderBrowserDialog d = new FolderBrowserDialog())
             {
-                d.Description = "Куда сохранять результат";
+                d.Description = Lang.T("Куда сохранять результат", "Where to save the results");
                 if (Directory.Exists(txtOut.Box.Text)) d.SelectedPath = txtOut.Box.Text;
                 if (d.ShowDialog(this) == DialogResult.OK) txtOut.Box.Text = d.SelectedPath;
             }
@@ -1470,7 +1586,7 @@ namespace ImageConverter
         void AddResult(string outPath, long outBytes, long srcBytes)
         {
             Entry en = new Entry { Path = outPath, Bytes = outBytes, SrcBytes = srcBytes, State = 3, InfoPending = true };
-            ListViewItem it = new ListViewItem(Path.GetFileName(en.Path)) { Tag = en, ToolTipText = en.Path + "\nДвойной щелчок — открыть" };
+            ListViewItem it = new ListViewItem(Path.GetFileName(en.Path)) { Tag = en, ToolTipText = en.Path + Lang.T("\nДвойной щелчок — открыть", "\nDouble-click to open") };
             outList.Items.Add(it);
             outList.EnsureVisible(it.Index);
             QueueInfo(outList, en, it);
@@ -1519,7 +1635,7 @@ namespace ImageConverter
         void OpenFile(string path)
         {
             try { Process.Start(path); }
-            catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть файл:\n" + ex.Message, Text); }
+            catch (Exception ex) { MessageBox.Show(this, Lang.T("Не удалось открыть файл:\n", "Couldn't open the file:\n") + ex.Message, Text); }
         }
 
         void ShowItemMenu(FileList l, Point pt)
@@ -1529,9 +1645,9 @@ namespace ImageConverter
             if (!it.Selected) { foreach (ListViewItem x in l.SelectedItems.Cast<ListViewItem>().ToList()) x.Selected = false; it.Selected = true; }
             string path = PathOf(l, it);
             ContextMenuStrip m = Menus.Create(this);
-            Menus.Add(m, "Открыть", delegate { OpenFile(path); });
-            Menus.Add(m, "Показать в папке", delegate { Process.Start("explorer.exe", "/select,\"" + path + "\""); });
-            if (!busy) Menus.Add(m, "Убрать из списка", delegate { RemoveSelected(l); });
+            Menus.Add(m, Lang.T("Открыть", "Open"), delegate { OpenFile(path); });
+            Menus.Add(m, Lang.T("Показать в папке", "Show in folder"), delegate { Process.Start("explorer.exe", "/select,\"" + path + "\""); });
+            if (!busy) Menus.Add(m, Lang.T("Убрать из списка", "Remove from list"), delegate { RemoveSelected(l); });
             m.Show(l, pt);
         }
 
@@ -1591,7 +1707,8 @@ namespace ImageConverter
                 outDir = txtOut.Box.Text.Trim();
                 if (outDir.Length == 0 || !Directory.Exists(outDir))
                 {
-                    MessageBox.Show(this, "Выберите существующую папку для сохранения или включите «Сохранять рядом с исходником».", Text);
+                    MessageBox.Show(this, Lang.T("Выберите существующую папку для сохранения или включите «Сохранять рядом с исходником».",
+                                                  "Choose an existing output folder or turn on “Save next to the original”."), Text);
                     return;
                 }
             }
@@ -1623,7 +1740,7 @@ namespace ImageConverter
                     // so a late "working" message can't overwrite "done"
                     en.State = 2;
                     string name = Path.GetFileName(en.Path);
-                    Ui(delegate { InvalidateItem(it); status.Text = "Конвертирую " + name + "…"; });
+                    Ui(delegate { InvalidateItem(it); status.Text = Lang.T("Конвертирую ", "Converting ") + name + "…"; });
 
                     bool success = false; string outPath = null, error = null; long outBytes = 0;
                     try
@@ -1646,7 +1763,7 @@ namespace ImageConverter
                     int d = done; string dirNow = lastDir; long srcBytes = en.Bytes;
                     Ui(delegate
                     {
-                        it.ToolTipText = success ? "Сохранено: " + outPath : "Ошибка: " + error;
+                        it.ToolTipText = SourceTip(en);
                         InvalidateItem(it);
                         if (success) { AddResult(outPath, outBytes, srcBytes); lastOutDir = dirNow; UpdateState(); }
                         progress.Value = (float)d / total;
@@ -1656,10 +1773,8 @@ namespace ImageConverter
                 Ui(delegate
                 {
                     busy = false;
-                    int failed = total - okF;
-                    string msg = "Готово: " + okF + " из " + total;
-                    if (failed > 0) msg += " · ошибок: " + failed + " (наведите на строку, чтобы увидеть причину)";
-                    status.Text = msg;
+                    doneOk = okF; doneTotal = total;
+                    status.Text = DoneMessage(okF, total);
                     UpdateState();
                 });
             });

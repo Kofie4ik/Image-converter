@@ -26,12 +26,21 @@ namespace ImageConverter
 
     class OutFormat
     {
-        public readonly string Name, Ext, Tool; public readonly EncKind Kind;
+        public readonly string Ext, Tool; public readonly EncKind Kind;
         public readonly ImageFormat Gdi; public readonly Guid EncoderId; public readonly bool HasQuality;
+        readonly string name;
+
+        static readonly Dictionary<string, string> EnglishNames = new Dictionary<string, string> {
+            { ".png", "PNG (lossless)" }, { ".heic", "HEIC (like on iPhone)" } };
+
+        public string Name
+        {
+            get { string en; return Lang.En && EnglishNames.TryGetValue(Ext, out en) ? en : name; }
+        }
 
         OutFormat(string name, string ext, EncKind kind, ImageFormat gdi, Guid id, string tool, bool quality)
         {
-            Name = name; Ext = ext; Kind = kind; Gdi = gdi; EncoderId = id; Tool = tool; HasQuality = quality;
+            this.name = name; Ext = ext; Kind = kind; Gdi = gdi; EncoderId = id; Tool = tool; HasQuality = quality;
         }
         static OutFormat G(string n, string e, ImageFormat f, bool q) { return new OutFormat(n, e, EncKind.Gdi, f, Guid.Empty, null, q); }
         static OutFormat R(string n, string e, string id, bool q) { return new OutFormat(n, e, EncKind.WinRt, null, new Guid(id), null, q); }
@@ -132,7 +141,7 @@ namespace ImageConverter
         // bgra: tightly packed 32bpp BGRA rows
         public static void Encode(Guid encoderId, byte[] bgra, int w, int h, string path, int quality)
         {
-            if (!Init()) throw new InvalidOperationException("WinRT-кодировщики недоступны");
+            if (!Init()) throw new InvalidOperationException(Lang.T("WinRT-кодировщики недоступны", "WinRT encoders are not available"));
             using (FileStream fs = File.Create(path))
             {
                 object ras = tStreamExt.GetMethod("AsRandomAccessStream", new[] { typeof(Stream) }).Invoke(null, new object[] { fs });
@@ -390,7 +399,8 @@ namespace ImageConverter
                 }
                 catch { }
             }
-            throw new Exception("Не найдена временная папка с латинским путём для внешнего кодировщика");
+            throw new Exception(Lang.T("Не найдена временная папка с латинским путём для внешнего кодировщика",
+                                       "No temp folder with an ASCII path was found for the external encoder"));
         }
 
         // External encoders get ASCII temp paths (some don't handle Unicode paths); the result is moved into place.
@@ -421,7 +431,7 @@ namespace ImageConverter
                     string err = p.StandardError.ReadToEnd();
                     p.WaitForExit();
                     if (p.ExitCode != 0 || !File.Exists(tmpOut))
-                        throw new Exception(f.Tool + " завершился с ошибкой: " + err.Trim());
+                        throw new Exception(f.Tool + Lang.T(" завершился с ошибкой: ", " failed: ") + err.Trim());
                 }
                 File.Move(tmpOut, path);
             }

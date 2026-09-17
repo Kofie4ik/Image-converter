@@ -1,67 +1,73 @@
-# Конвертер картинок
+# Image Converter
 
-Небольшая программа для Windows: перетаскиваете картинки — получаете их в нужном формате и размере, сразу пачкой. Слева исходные файлы, справа готовые с новым весом и тем, насколько он изменился.
+**English** | [Русский](README.ru.md)
 
-![Тёмная тема](docs/dark.png)
+A small Windows app: drop images in and get them back in the format and size you need, in batches. Source files are on the left, converted ones on the right with their new size and how much it changed.
+
+![Dark theme](docs/en-dark.png)
 
 <details>
-<summary>Светлая тема</summary>
+<summary>Light theme</summary>
 
-![Светлая тема](docs/light.png)
+![Light theme](docs/en-light.png)
 
 </details>
 
-## Возможности
+## Features
 
-- **Открывает:** JPG, PNG, WebP, HEIC/HEIF, AVIF, JPEG XL, RAW с фотоаппаратов (CR2, CR3, NEF, ARW, DNG и др.), BMP, GIF, TIFF, ICO, DDS
-- **Сохраняет:** PNG, JPG, HEIC, JPEG XR, BMP, TIFF, GIF (для JPG, HEIC и JPEG XR — регулировка качества)
-- **Размер:** как есть, заполнить с обрезкой, вписать с полями или растянуть — например, под ультраширокий монитор 3440×1440
-- Файлы и целые папки (со вложенными) перетаскиваются прямо в окно
-- Миниатюры, разрешение и вес до/после для каждого файла
-- Поворачивает фото с телефона по EXIF
-- Ничего не перезаписывает: если имя занято, добавит «(2)»
-- Тёмная и светлая тема
-- Один маленький `.exe` (~100 КБ), установка не нужна
+- **Opens:** JPG, PNG, WebP, HEIC/HEIF, AVIF, JPEG XL, camera RAW (CR2, CR3, NEF, ARW, DNG and more), BMP, GIF, TIFF, ICO, DDS
+- **Saves:** PNG, JPG, HEIC, JPEG XR, BMP, TIFF, GIF (adjustable quality for JPG, HEIC and JPEG XR)
+- **Resize:** keep original, fill with cropping, fit with borders or stretch — e.g. for a 3440×1440 ultrawide monitor
+- Drag files and whole folders (with subfolders) straight into the window
+- Thumbnails, resolution and file size before/after for every file
+- Rotates phone photos according to EXIF
+- Never overwrites anything: if a name is taken, it adds “(2)”
+- Dark and light themes, English and Russian UI (RU/EN button)
+- A single small `.exe` (~100 KB), no installation
 
-## Требования
+## Requirements
 
-Windows 10/11. Всё нужное уже есть в системе (.NET Framework 4.8).
+Windows 10/11. Everything it needs already ships with the system (.NET Framework 4.8).
 
-Какие форматы открываются, зависит от установленных в Windows расширений. Если файл не открывается, поставьте бесплатные расширения из Microsoft Store:
+Which formats open depends on the image extensions installed in Windows. If a file won't open, install the free extensions from the Microsoft Store:
 
-- HEIC — «Расширения для изображений HEIF» (и «Расширения для видео HEVC»)
-- AVIF — «Расширение видео AV1»
-- WebP — «Расширение для изображений WebP»
-- RAW — «Расширение для необработанных изображений»
+- HEIC — “HEIF Image Extensions” (and “HEVC Video Extensions”)
+- AVIF — “AV1 Video Extension”
+- WebP — “Webp Image Extensions”
+- RAW — “Raw Image Extension”
 
-## Сборка
+## Building
 
-Ничего устанавливать не нужно — компилятор C# входит в Windows:
+Nothing to install — the C# compiler comes with Windows:
 
 ```bat
 build.bat
 ```
 
-Готовая программа появится в `bin\ImageConverter.exe`.
+The app will be in `bin\ImageConverter.exe`.
 
-## Сохранение в WebP, AVIF и JPEG XL
+## Saving to WebP, AVIF and JPEG XL
 
-Встроенных кодировщиков этих форматов в Windows нет. Если положить в папку `tools` рядом с программой официальные утилиты, форматы сами появятся в списке:
+Windows has no built-in encoders for these formats. Put the official command-line tools into a `tools` folder next to the app and the formats will show up in the list:
 
-| Формат | Файл | Откуда |
+| Format | File | Where to get it |
 |---|---|---|
 | WebP | `cwebp.exe` | [libwebp](https://developers.google.com/speed/webp/download) |
 | AVIF | `avifenc.exe` | [libavif](https://github.com/AOMediaCodec/libavif/releases) |
 | JPEG XL | `cjxl.exe` | [libjxl](https://github.com/libjxl/libjxl/releases) |
 
-## Командная строка
+## Command line
 
 ```bat
-ImageConverter.exe --cli "вход.jpg" "выход.heic" [ШxВ] [fill|fit|stretch] [качество]
+ImageConverter.exe --cli "input.jpg" "output.heic" [WxH] [fill|fit|stretch] [quality]
 ```
 
-Например: `ImageConverter.exe --cli photo.png wallpaper.jpg 3440x1440 fill 92`
+Example: `ImageConverter.exe --cli photo.png wallpaper.jpg 3440x1440 fill 92`
 
-## Лицензия
+## Language
+
+On first launch the app follows the Windows display language (Russian for Russian, Ukrainian, Belarusian and Kazakh; English otherwise). The RU/EN button switches it; the choice is remembered.
+
+## License
 
 [MIT](LICENSE)
